@@ -2,10 +2,11 @@
 pragma solidity ^0.8.13;
 
 import {ERC20Wrapper} from "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/ERC20Wrapper.sol";
+import {ERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
 contract SpendingLimitERC20 is ERC20Wrapper {
-    mapping(address => OwnerConfig) private _configs;
+    mapping(address => OwnerConfig) internal _configs;
 
     struct OwnerConfig {
         uint256 allowanceStart;
@@ -21,10 +22,7 @@ contract SpendingLimitERC20 is ERC20Wrapper {
         string memory name,
         string memory symbol,
         IERC20 underlyingToken
-    ) {
-        // ERC20(name, symbol);
-        ERC20Wrapper(underlyingToken);
-    }
+    ) ERC20(name, symbol) ERC20Wrapper(underlyingToken) {}
 
     /**
      * @dev see {ERC20 approve}
@@ -36,7 +34,7 @@ contract SpendingLimitERC20 is ERC20Wrapper {
     ) public override returns (bool) {
         address owner = _msgSender();
         _approve(owner, spender, amount);
-        _configs[msg.sender].approvalPeriod(spender) = block.timestamp;
+        _configs[msg.sender].approvalStarts[spender] = block.timestamp;
         return true;
     }
 
@@ -78,21 +76,21 @@ contract SpendingLimitERC20 is ERC20Wrapper {
     /**
      * @dev get spending limit for allowance period
      */
-    function getSpendingLimit() external returns (uint256) {
+    function getSpendingLimit() external view returns (uint256) {
         return _configs[msg.sender].spendingLimit;
     }
 
     /**
      * @dev get approval half-life interval (e.g. 1 months)
      */
-    function getDecayInterval() external returns (uint256) {
+    function getDecayInterval() external view returns (uint256) {
         return _configs[msg.sender].decayInterval;
     }
 
     /**
      * @dev get approval expiration (e.g. 6 months)
      */
-    function getExpiration() external returns (uint256) {
+    function getExpiration() external view returns (uint256) {
         return _configs[msg.sender].approvalPeriod;
     }
 
@@ -105,7 +103,7 @@ contract SpendingLimitERC20 is ERC20Wrapper {
         address spender,
         uint256 amount
     ) internal override {
-        uint256 approvalStart = _configs[msg.sender].approvalStarts(spender);
+        uint256 approvalStart = _configs[msg.sender].approvalStarts[spender];
         uint256 approvalPeriod = _configs[msg.sender].approvalPeriod;
         uint256 timestamp = block.timestamp;
 
@@ -180,7 +178,7 @@ contract SpendingLimitERC20 is ERC20Wrapper {
     /**
      * @dev calculate decay
      */
-    function _decay(uint256 n, uint256 amount) internal {
+    function _decay(uint256 n, uint256 amount) internal returns (uint256) {
         if (n == 0) return amount;
         if (n == 1) return amount / 2;
         else return _decay(n - 1, amount / 2);
