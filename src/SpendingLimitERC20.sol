@@ -6,15 +6,24 @@ import {ERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol"
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
 contract SpendingLimitERC20 is ERC20Wrapper {
-    mapping(address => OwnerConfig) internal _configs;
+    mapping(address => UserConfig) internal _configs;
 
-    struct OwnerConfig {
+    /** @dev UserConfig
+     * spent = sum of `_transfer` during `allowancePeriod`
+     * spendingLimit = spending limit during `allowancePeriod`
+     * allowanceStart = allowance start-time, set with `spendingLimit`
+     * allowancePeriod = allowance period before `spent` is reset
+     * approvalPeriod = allowance period for token approvals before expiration
+     * decayInterval = decay rate half-life of token approvals
+     * approvalStarts = allowance start-time of token approvals
+     */
+    struct UserConfig {
+        uint256 spent;
+        uint256 spendingLimit;
         uint256 allowanceStart;
         uint256 allowancePeriod;
-        uint256 spendingLimit;
         uint256 approvalPeriod;
         uint256 decayInterval;
-        uint256 spent;
         mapping(address => uint256) approvalStarts;
     }
 
@@ -26,7 +35,7 @@ contract SpendingLimitERC20 is ERC20Wrapper {
 
     /**
      * @dev see {ERC20 approve}
-     * OwnerConfig spender approval start-time updated
+     * UserConfig spender approval start-time updated
      */
     function approve(
         address spender,
@@ -39,59 +48,67 @@ contract SpendingLimitERC20 is ERC20Wrapper {
     }
 
     /**
-     * @dev set default config
-     */
-    function setDefaultConfig() external {
-        setSpendingLimit(1000 * (1e18)); // 1000 tokens
-        setDecayInterval(30 days); // 1 month halving
-        setExpiration(182.5 days); // 6 month expiration
-    }
-
-    /**
-     * @dev set spending limit for allowance period
+     * @dev set custom config
      * set to max int (2**256 - 1) for no limit
      */
-    function setSpendingLimit(uint256 _spendingLimit) public {
-        _configs[msg.sender].spendingLimit = _spendingLimit;
+    function setCustomConfig(
+        uint256 _spendingLimit,
+        uint256 _allowancePeriod,
+        uint256 _approvalPeriod,
+        uint256 _decayInterval
+    ) public {
+        UserConfig storage config = _configs[msg.sender];
+
+        config.spendingLimit = _spendingLimit;
+        config.allowanceStart = block.timestamp;
+        config.allowancePeriod = _allowancePeriod;
+        config.approvalPeriod = _approvalPeriod;
+        config.decayInterval = _decayInterval;
     }
 
     /**
-     * @dev set approval half-life interval (e.g. 1 months)
-     * approval amount halves at each interval until expiration
-     * set to max int (2**256 - 1) for no decay
+     * @dev set default config
+     * 1000 tokens, 1 month allowance, 6 month approval, 1 month half-life
      */
-    function setDecayInterval(uint256 _decayInterval) public {
-        _configs[msg.sender].decayInterval = _decayInterval;
+    function setDefaultConfig() external {
+        uint256 spendingLimit = 1000 * 1e18;
+        setCustomConfig(spendingLimit, 30 days, 182.5 days, 30 days);
     }
 
     /**
-     * @dev set approval period before expiration (e.g. 6 months)
-     * approval amount zeroed / revoked when active period ends
-     * set to max int (2**256 - 1) for no expiration
+     * @dev get current allowance period start and end
      */
-    function setExpiration(uint256 _approvalPeriod) public {
-        _configs[msg.sender].approvalPeriod = _approvalPeriod;
+    function getAllowanceStartAndEnd()
+        external
+        returns (uint256 start, uint256 end)
+    {
+        _checkAndUpdateAllowancePeriod();
+        start = _configs[msg.sender].allowanceStart;
+        end = start + _configs[msg.sender].allowancePeriod;
     }
 
     /**
-     * @dev get spending limit for allowance period
+     * @dev get current allowance limit and spent
      */
-    function getSpendingLimit() external view returns (uint256) {
-        return _configs[msg.sender].spendingLimit;
+    function getAllowanceLimitAndSpent()
+        external
+        returns (uint256 spendingLimit, uint256 spent)
+    {
+        _checkAndUpdateAllowancePeriod();
+        spendingLimit = _configs[msg.sender].spendingLimit;
+        spent = _configs[msg.sender].spent;
     }
 
     /**
-     * @dev get approval half-life interval (e.g. 1 months)
+     * @dev get token approval and decay rates
      */
-    function getDecayInterval() external view returns (uint256) {
-        return _configs[msg.sender].decayInterval;
-    }
-
-    /**
-     * @dev get approval expiration (e.g. 6 months)
-     */
-    function getExpiration() external view returns (uint256) {
-        return _configs[msg.sender].approvalPeriod;
+    function getApprovalPeriodAndDecay()
+        external
+        view
+        returns (uint256 approvalPeriod, uint256 decayInterval)
+    {
+        approvalPeriod = _configs[msg.sender].approvalPeriod;
+        decayInterval = _configs[msg.sender].decayInterval;
     }
 
     /**
@@ -104,21 +121,18 @@ contract SpendingLimitERC20 is ERC20Wrapper {
         uint256 amount
     ) internal override {
         uint256 approvalStart = _configs[msg.sender].approvalStarts[spender];
-        uint256 approvalPeriod = _configs[msg.sender].approvalPeriod;
+        uint256 decayInterval = _configs[msg.sender].decayInterval;
         uint256 timestamp = block.timestamp;
 
         require(
-            timestamp <= (approvalStart + approvalPeriod),
+            timestamp > (approvalStart + _configs[msg.sender].approvalPeriod),
             "SL: approval expired"
         );
 
         uint256 currentAllowance = allowance(owner, spender);
-
         if (currentAllowance != type(uint256).max) {
-            uint256 period = timestamp - approvalStart;
-
-            if (period > approvalPeriod) {
-                uint256 periods = period / _configs[msg.sender].decayInterval;
+            if (timestamp > (approvalStart + decayInterval)) {
+                uint256 periods = timestamp - approvalStart / decayInterval;
                 currentAllowance = _decay(periods, currentAllowance);
             }
 
@@ -134,49 +148,50 @@ contract SpendingLimitERC20 is ERC20Wrapper {
 
     /**
      * @dev enfore spending limit
+     * if `from` and `to` are non-zero, token transfer (spend)
+     * if `from` is zero, token mint (wrapping)
+     * if `to` is zero, token burn (unwrapping)
      */
     function _beforeTokenTransfer(
         address from,
         address to,
         uint256 amount
     ) internal override {
-        // if `from` and `to` are non-zero, token transfer (spend)
-        // if `from` is zero, token mint (wrapping)
-        // if `to` is zero, token burn (unwrapping)
         if (from != address(0) && to != address(0)) {
-            uint256 allowanceStart = _configs[msg.sender].allowanceStart;
-            uint256 allowancePeriod = _configs[msg.sender].allowancePeriod;
-            uint256 timestamp = block.timestamp;
+            _checkAndUpdateAllowancePeriod();
 
-            // check allowance period
-            if (timestamp > (allowanceStart + allowancePeriod)) {
-                // calculate new start period
-                uint256 periods = (timestamp - allowanceStart) /
-                    allowancePeriod;
-
-                // set current allowance period
-                _configs[msg.sender].allowanceStart =
-                    allowanceStart +
-                    (periods * allowancePeriod);
-
-                // reset allowance
-                _configs[msg.sender].spent = 0;
-            }
-
-            // check allowance
             uint256 toSpend = _configs[msg.sender].spent + amount;
             require(
                 _configs[msg.sender].spendingLimit >= toSpend,
                 "SL: cannot breach spending limit"
             );
 
-            // update spent
             _configs[msg.sender].spent = toSpend;
         }
     }
 
     /**
-     * @dev calculate decay
+     * @dev check allowance period is up-to-date
+     * if not, update period and allowance
+     */
+    function _checkAndUpdateAllowancePeriod() internal {
+        uint256 allowanceStart = _configs[msg.sender].allowanceStart;
+        uint256 allowancePeriod = _configs[msg.sender].allowancePeriod;
+        uint256 timestamp = block.timestamp;
+
+        if (timestamp > (allowanceStart + allowancePeriod)) {
+            uint256 periods = (timestamp - allowanceStart) / allowancePeriod;
+
+            _configs[msg.sender].allowanceStart =
+                allowanceStart +
+                (periods * allowancePeriod);
+
+            _configs[msg.sender].spent = 0;
+        }
+    }
+
+    /**
+     * @dev calculate decay rate half-life
      */
     function _decay(uint256 n, uint256 amount) internal returns (uint256) {
         if (n == 0) return amount;
