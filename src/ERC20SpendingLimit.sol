@@ -5,10 +5,14 @@ import {ERC20Wrapper} from "lib/openzeppelin-contracts/contracts/token/ERC20/ext
 import {ERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
-contract SpendingLimitERC20 is ERC20Wrapper {
+contract ERC20SpendingLimit is ERC20Wrapper {
     mapping(address => UserConfig) internal _configs;
 
     /** @dev UserConfig
+     * all transfers call `_checkAndUpdateAllowancePeriod`
+     * which checks that UserConfig exists
+     * owner of tokens must create config before outbound transfers are enabled
+     *
      * spent = sum of `_transfer` during `allowancePeriod`
      * spendingLimit = spending limit during `allowancePeriod`
      * allowanceStart = allowance start-time, set with `spendingLimit`
@@ -42,6 +46,10 @@ contract SpendingLimitERC20 is ERC20Wrapper {
         uint256 amount
     ) public override returns (bool) {
         address owner = _msgSender();
+        require(
+            amount <= _configs[owner].spendingLimit,
+            "SL: approval exceeds spending limit"
+        );
         _approve(owner, spender, amount);
         _configs[msg.sender].approvalStarts[spender] = block.timestamp;
         return true;
@@ -49,7 +57,9 @@ contract SpendingLimitERC20 is ERC20Wrapper {
 
     /**
      * @dev set custom config
-     * set to max int (2**256 - 1) for no limit
+     * for infinite input, set to max int (2**256 - 1)
+     * if new config, set `allowanceStart` to `block.timestamp`
+     * otherwise update based on `_allowancePeriod`
      */
     function setCustomConfig(
         uint256 _spendingLimit,
@@ -57,13 +67,23 @@ contract SpendingLimitERC20 is ERC20Wrapper {
         uint256 _approvalPeriod,
         uint256 _decayInterval
     ) public {
+        uint256 timestamp = block.timestamp;
         UserConfig storage config = _configs[msg.sender];
+        uint256 start = config.allowanceStart;
 
         config.spendingLimit = _spendingLimit;
-        config.allowanceStart = block.timestamp;
         config.allowancePeriod = _allowancePeriod;
         config.approvalPeriod = _approvalPeriod;
         config.decayInterval = _decayInterval;
+
+        if (start > 0) {
+            if (timestamp > start + _allowancePeriod) {
+                uint256 periods = (timestamp - start) / _allowancePeriod;
+                config.allowanceStart = start + (periods * _allowancePeriod);
+            }
+        } else {
+            config.allowanceStart = timestamp;
+        }
     }
 
     /**
@@ -123,19 +143,18 @@ contract SpendingLimitERC20 is ERC20Wrapper {
         uint256 approvalStart = _configs[msg.sender].approvalStarts[spender];
         uint256 decayInterval = _configs[msg.sender].decayInterval;
         uint256 timestamp = block.timestamp;
-
         require(
             timestamp > (approvalStart + _configs[msg.sender].approvalPeriod),
             "SL: approval expired"
         );
 
         uint256 currentAllowance = allowance(owner, spender);
+
         if (currentAllowance != type(uint256).max) {
             if (timestamp > (approvalStart + decayInterval)) {
                 uint256 periods = timestamp - approvalStart / decayInterval;
                 currentAllowance = _decay(periods, currentAllowance);
             }
-
             require(
                 currentAllowance >= amount,
                 "ERC20: insufficient allowance"
@@ -171,11 +190,13 @@ contract SpendingLimitERC20 is ERC20Wrapper {
     }
 
     /**
-     * @dev check allowance period is up-to-date
-     * if not, update period and allowance
+     * @dev check `allowancePeriod` is up-to-date
+     * if not, update `allowancePeriod` and set `spent` to zero
+     * if `allowanceStart` is zero, config does not exist; revert
      */
     function _checkAndUpdateAllowancePeriod() internal {
         uint256 allowanceStart = _configs[msg.sender].allowanceStart;
+        require(allowanceStart > 0, "SL: config does not exist");
         uint256 allowancePeriod = _configs[msg.sender].allowancePeriod;
         uint256 timestamp = block.timestamp;
 
