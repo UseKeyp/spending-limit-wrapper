@@ -4,11 +4,11 @@ pragma solidity ^0.8.13;
 import {TestHelper} from "test/TestHelper.t.sol";
 
 /** @dev Trace: -vvvv, No trace: -vv
- * forge test --match-contract Transfer -vv
+ * forge test --match-contract TransferTo -vv
  */
 
-contract Transfer is TestHelper {
-    // alice config: 300-t, 7-all,  1-app,   7-dec
+contract TransferTo is TestHelper {
+    // alice config: 300-t, 7-all,  30-app,   7-dec
     // bob   config: 500-t, 30-all, 180-app, 30-dec
 
     /**
@@ -19,6 +19,35 @@ contract Transfer is TestHelper {
         vm.startPrank(alice);
         wToken.transfer(cobra, spends[1]);
 
+        assertEq(wToken.balanceOf(alice), initBal - spends[1]);
+        assertEq(wToken.balanceOf(cobra), spends[1]);
+    }
+
+    /**
+     * @dev should fail send transfer: no user config
+     */
+    function testSpendWithoutConfigFail() public {
+        setupUsers();
+        vm.startPrank(alice);
+        wToken.transfer(cobra, spends[3]);
+
+        assertEq(wToken.balanceOf(alice), initBal - spends[3]);
+        assertEq(wToken.balanceOf(cobra), spends[3]);
+        vm.stopPrank();
+
+        vm.startPrank(cobra);
+
+        vm.expectRevert("SL: config does not exist");
+        wToken.transfer(alice, spends[2]);
+
+        wToken.setCustomConfig(
+            spends[3],
+            all_period[1],
+            app_period[0],
+            decay_int[0]
+        );
+
+        wToken.transfer(alice, spends[2]);
         assertEq(wToken.balanceOf(alice), initBal - spends[1]);
         assertEq(wToken.balanceOf(cobra), spends[1]);
     }
@@ -195,8 +224,7 @@ contract Transfer is TestHelper {
      */
     function testSendAndIncreaseLimitOverTime() public {
         setupUsers();
-        vm.warp(block.timestamp + 1 days);
-        assertEq(block.timestamp, 1 days + 1 seconds);
+        warpForward(1 days, 1 days);
 
         vm.startPrank(alice);
         wToken.transfer(cobra, spends[3]);
@@ -205,8 +233,7 @@ contract Transfer is TestHelper {
         assertEq(limit1, spends[3]);
         assertEq(spent1, spends[3]);
 
-        vm.warp(block.timestamp + 1 days);
-        assertEq(block.timestamp, 2 days + 1 seconds);
+        warpForward(1 days, 2 days);
 
         wToken.setCustomConfig(
             spends[5],
@@ -215,8 +242,7 @@ contract Transfer is TestHelper {
             decay_int[0]
         );
 
-        vm.warp(block.timestamp + 1 days);
-        assertEq(block.timestamp, 3 days + 1 seconds);
+        warpForward(1 days, 3 days);
 
         (uint256 limit2, uint256 spent2) = wToken.getAllowanceLimitAndSpent();
         assertEq(limit2, spends[5]);
@@ -225,8 +251,7 @@ contract Transfer is TestHelper {
         vm.expectRevert("SL: cannot breach spending limit");
         wToken.transfer(cobra, spends[5]);
 
-        vm.warp(block.timestamp + 1 days);
-        assertEq(block.timestamp, 4 days + 1 seconds);
+        warpForward(1 days, 4 days);
 
         wToken.transfer(cobra, spends[2]);
 
@@ -234,8 +259,7 @@ contract Transfer is TestHelper {
         assertEq(limit3, spends[5]);
         assertEq(spent3, spends[5]);
 
-        vm.warp(block.timestamp + 4 days);
-        assertEq(block.timestamp, 8 days + 1 seconds);
+        warpForward(4 days, 8 days);
 
         (uint256 limit4, uint256 spent4) = wToken.getAllowanceLimitAndSpent();
         assertEq(limit4, spends[5]);
@@ -254,8 +278,7 @@ contract Transfer is TestHelper {
         setupUsers();
         vm.startPrank(alice);
 
-        vm.warp(block.timestamp + 2 days);
-        assertEq(block.timestamp, 2 days + 1 seconds);
+        warpForward(2 days, 2 days);
 
         (uint256 start1, uint256 end1) = wToken.getAllowanceStartAndEnd();
         assertEq(start1, 1 seconds);
@@ -265,8 +288,7 @@ contract Transfer is TestHelper {
         assertEq(limit1, spends[3]);
         assertEq(spent1, spends[0]);
 
-        vm.warp(block.timestamp + 2 days);
-        assertEq(block.timestamp, 4 days + 1 seconds);
+        warpForward(2 days, 4 days);
 
         wToken.transfer(cobra, spends[1]);
 
@@ -274,8 +296,7 @@ contract Transfer is TestHelper {
         assertEq(limit2, spends[3]);
         assertEq(spent2, spends[1]);
 
-        vm.warp(block.timestamp + 2 days);
-        assertEq(block.timestamp, 6 days + 1 seconds);
+        warpForward(2 days, 6 days);
 
         wToken.transfer(cobra, spends[2]);
 
@@ -283,8 +304,7 @@ contract Transfer is TestHelper {
         assertEq(limit3, spends[3]);
         assertEq(spent3, spends[3]);
 
-        vm.warp(block.timestamp + 2 days);
-        assertEq(block.timestamp, 8 days + 1 seconds);
+        warpForward(2 days, 8 days);
 
         (uint256 start2, uint256 end2) = wToken.getAllowanceStartAndEnd();
         assertEq(start2, 7 days + 1 seconds);
@@ -295,14 +315,136 @@ contract Transfer is TestHelper {
         assertEq(spent4, spends[0]);
     }
 
-    // todo update config settings
+    /**
+     * @dev `allowanceStart` should remain stable despite config updates
+     */
+    function testMultiPeriodGap() public {
+        setupUsers();
+        vm.startPrank(alice);
 
-    // todo spend allowance, update config to more, over-spend
-    // todo spend allowance, update config to less, spend to new limit
-    // todo spend allowance, update config to less, over-spend
-    // todo spend allowance after renew
-    // todo transfer, approve/transFrom spend combination
-    // todo transfer, approve/transFrom over-spend combination
+        (uint256 start1, uint256 end1) = wToken.getAllowanceStartAndEnd();
+        assertEq(start1, 1 seconds);
+        assertEq(end1, 7 days + 1 seconds);
 
-    // todo approve, update config, attempt to breach current limit with old approval
+        warpForward(23 days, 23 days);
+
+        wToken.setCustomConfig(
+            spends[3],
+            all_period[0],
+            app_period[0],
+            decay_int[0]
+        );
+
+        (uint256 start2, uint256 end2) = wToken.getAllowanceStartAndEnd();
+        assertEq(start2, 21 days + 1 seconds);
+        assertEq(end2, 28 days + 1 seconds);
+    }
+
+    /**
+     * @dev `allowanceStart` should remain stable despite config updates
+     * increase `allowancePeriod`
+     */
+    function testIncreasePeriodStableStart() public {
+        setupUsers();
+        vm.startPrank(alice);
+
+        warpForward(3 days, 3 days);
+
+        (uint256 start1, uint256 end1) = wToken.getAllowanceStartAndEnd();
+        assertEq(start1, 1 seconds);
+        assertEq(end1, 7 days + 1 seconds);
+
+        (uint256 limit1, uint256 spent1) = wToken.getAllowanceLimitAndSpent();
+        assertEq(limit1, spends[3]);
+        assertEq(spent1, spends[0]);
+
+        wToken.transfer(cobra, spends[1]);
+
+        wToken.setCustomConfig(
+            spends[5],
+            all_period[1],
+            app_period[0],
+            decay_int[0]
+        );
+
+        warpForward(3 days, 6 days);
+
+        wToken.transfer(cobra, spends[1]);
+
+        (uint256 start2, uint256 end2) = wToken.getAllowanceStartAndEnd();
+        assertEq(start2, 1 seconds);
+        assertEq(end2, 30 days + 1 seconds);
+
+        (uint256 limit2, uint256 spent2) = wToken.getAllowanceLimitAndSpent();
+        assertEq(limit2, spends[5]);
+        assertEq(spent2, spends[2]);
+
+        warpForward(3 days, 9 days);
+
+        (uint256 limit3, uint256 spent3) = wToken.getAllowanceLimitAndSpent();
+        assertEq(limit3, spends[5]);
+        assertEq(spent3, spends[2]);
+    }
+
+    /**
+     * @dev `allowanceStart` should remain stable despite config updates
+     * decrease `allowancePeriod`
+     */
+    function testDecreasePeriodStableStart() public {
+        setupUsers();
+        vm.startPrank(bob);
+
+        warpForward(3 days, 3 days);
+
+        (uint256 start1, uint256 end1) = wToken.getAllowanceStartAndEnd();
+        assertEq(start1, 1 seconds);
+        assertEq(end1, 30 days + 1 seconds);
+
+        (uint256 limit1, uint256 spent1) = wToken.getAllowanceLimitAndSpent();
+        assertEq(limit1, spends[5]);
+        assertEq(spent1, spends[0]);
+
+        wToken.transfer(cobra, spends[4]);
+
+        wToken.setCustomConfig(
+            spends[3],
+            all_period[0],
+            app_period[0],
+            decay_int[0]
+        );
+
+        warpForward(3 days, 6 days);
+
+        vm.expectRevert("SL: cannot breach spending limit");
+        wToken.transfer(cobra, spends[1]);
+
+        (uint256 start2, uint256 end2) = wToken.getAllowanceStartAndEnd();
+        assertEq(start2, 1 seconds);
+        assertEq(end2, 7 days + 1 seconds);
+
+        (uint256 limit2, uint256 spent2) = wToken.getAllowanceLimitAndSpent();
+        assertEq(limit2, spends[3]);
+        assertEq(spent2, spends[4]);
+
+        warpForward(3 days, 9 days);
+
+        (uint256 limit3, uint256 spent3) = wToken.getAllowanceLimitAndSpent();
+        assertEq(limit3, spends[3]);
+        assertEq(spent3, spends[0]);
+
+        (uint256 start3, uint256 end3) = wToken.getAllowanceStartAndEnd();
+        assertEq(start3, 7 days + 1 seconds);
+        assertEq(end3, 14 days + 1 seconds);
+
+        wToken.setCustomConfig(
+            spends[3],
+            all_period[1],
+            app_period[0],
+            decay_int[0]
+        );
+
+        (uint256 start4, uint256 end4) = wToken.getAllowanceStartAndEnd();
+        assertEq(start4, 7 days + 1 seconds);
+        assertEq(end4, 37 days + 1 seconds);
+    }
 }

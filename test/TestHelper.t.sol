@@ -35,7 +35,7 @@ contract TestHelper is Test {
 
     // config settings arrays
     uint256[] public all_period = [7 days, 30 days];
-    uint256[] public app_period = [1 days, 180 days];
+    uint256[] public app_period = [30 days, 180 days];
     uint256[] public decay_int = [7 days, 30 days];
 
     // token contracts
@@ -127,5 +127,13 @@ contract TestHelper is Test {
             app_period[1],
             decay_int[1]
         );
+    }
+
+    /**
+     * @dev move time `forward`, and enforce correct current time `_now`
+     */
+    function warpForward(uint256 forward, uint256 _now) public {
+        vm.warp(block.timestamp + forward);
+        assertEq(block.timestamp, _now + 1 seconds);
     }
 }

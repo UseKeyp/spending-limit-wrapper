@@ -19,7 +19,7 @@ contract ERC20SpendingLimit is ERC20Wrapper {
      * allowancePeriod = allowance period before `spent` is reset
      * approvalPeriod = allowance period for token approvals before expiration
      * decayInterval = decay rate half-life of token approvals
-     * approvalStarts = allowance start-time of token approvals
+     * approvalStart = allowance expiration of token approvals
      */
     struct UserConfig {
         uint256 spent;
@@ -28,7 +28,7 @@ contract ERC20SpendingLimit is ERC20Wrapper {
         uint256 allowancePeriod;
         uint256 approvalPeriod;
         uint256 decayInterval;
-        mapping(address => uint256) approvalStarts;
+        mapping(address => uint256) approvalStart;
     }
 
     constructor(
@@ -51,7 +51,7 @@ contract ERC20SpendingLimit is ERC20Wrapper {
             "SL: approval exceeds spending limit"
         );
         _approve(owner, spender, amount);
-        _configs[msg.sender].approvalStarts[spender] = block.timestamp;
+        _configs[owner].approvalStart[spender] = block.timestamp;
         return true;
     }
 
@@ -102,7 +102,7 @@ contract ERC20SpendingLimit is ERC20Wrapper {
         external
         returns (uint256 start, uint256 end)
     {
-        _checkAndUpdateAllowancePeriod();
+        _checkAndUpdateAllowancePeriod(msg.sender);
         start = _configs[msg.sender].allowanceStart;
         end = start + _configs[msg.sender].allowancePeriod;
     }
@@ -114,9 +114,19 @@ contract ERC20SpendingLimit is ERC20Wrapper {
         external
         returns (uint256 spendingLimit, uint256 spent)
     {
-        _checkAndUpdateAllowancePeriod();
+        _checkAndUpdateAllowancePeriod(msg.sender);
         spendingLimit = _configs[msg.sender].spendingLimit;
         spent = _configs[msg.sender].spent;
+    }
+
+    /**
+     * @dev get token approval start time and expiration
+     */
+    function getApprovalStartAndEnd(
+        address spender
+    ) external view returns (uint256 approvalStart, uint256 expiration) {
+        approvalStart = _configs[msg.sender].approvalStart[spender];
+        expiration = approvalStart + _configs[msg.sender].approvalPeriod;
     }
 
     /**
@@ -140,21 +150,22 @@ contract ERC20SpendingLimit is ERC20Wrapper {
         address spender,
         uint256 amount
     ) internal override {
-        uint256 approvalStart = _configs[msg.sender].approvalStarts[spender];
-        uint256 decayInterval = _configs[msg.sender].decayInterval;
         uint256 timestamp = block.timestamp;
+        uint256 start = _configs[owner].approvalStart[spender];
         require(
-            timestamp > (approvalStart + _configs[msg.sender].approvalPeriod),
+            timestamp < start + _configs[owner].approvalPeriod,
             "SL: approval expired"
         );
 
+        uint256 decayInterval = _configs[owner].decayInterval;
         uint256 currentAllowance = allowance(owner, spender);
 
+        if (timestamp > (start + decayInterval)) {
+            uint256 periods = (timestamp - start) / decayInterval;
+            uint256 decay = _decay(periods, currentAllowance);
+            require(amount <= decay, "SL: amount exceeds decay");
+        }
         if (currentAllowance != type(uint256).max) {
-            if (timestamp > (approvalStart + decayInterval)) {
-                uint256 periods = timestamp - approvalStart / decayInterval;
-                currentAllowance = _decay(periods, currentAllowance);
-            }
             require(
                 currentAllowance >= amount,
                 "ERC20: insufficient allowance"
@@ -177,37 +188,37 @@ contract ERC20SpendingLimit is ERC20Wrapper {
         uint256 amount
     ) internal override {
         if (from != address(0) && to != address(0)) {
-            _checkAndUpdateAllowancePeriod();
+            _checkAndUpdateAllowancePeriod(from);
 
-            uint256 toSpend = _configs[msg.sender].spent + amount;
+            uint256 toSpend = _configs[from].spent + amount;
             require(
-                _configs[msg.sender].spendingLimit >= toSpend,
+                _configs[from].spendingLimit >= toSpend,
                 "SL: cannot breach spending limit"
             );
 
-            _configs[msg.sender].spent = toSpend;
+            _configs[from].spent = toSpend;
         }
     }
 
     /**
      * @dev check `allowancePeriod` is up-to-date
      * if not, update `allowancePeriod` and set `spent` to zero
-     * if `allowanceStart` is zero, config does not exist; revert
+     * if `allowanceStart` is zero, `transferFrom` call
      */
-    function _checkAndUpdateAllowancePeriod() internal {
-        uint256 allowanceStart = _configs[msg.sender].allowanceStart;
+    function _checkAndUpdateAllowancePeriod(address owner) internal {
+        uint256 allowanceStart = _configs[owner].allowanceStart;
         require(allowanceStart > 0, "SL: config does not exist");
-        uint256 allowancePeriod = _configs[msg.sender].allowancePeriod;
+        uint256 allowancePeriod = _configs[owner].allowancePeriod;
         uint256 timestamp = block.timestamp;
 
         if (timestamp > (allowanceStart + allowancePeriod)) {
             uint256 periods = (timestamp - allowanceStart) / allowancePeriod;
 
-            _configs[msg.sender].allowanceStart =
+            _configs[owner].allowanceStart =
                 allowanceStart +
                 (periods * allowancePeriod);
 
-            _configs[msg.sender].spent = 0;
+            _configs[owner].spent = 0;
         }
     }
 
